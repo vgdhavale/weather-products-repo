@@ -1,9 +1,9 @@
-name: Generate weather products (GFS + Skew‑T)
+name: Generate weather products (3 GFS + Skew‑T)
 
 on:
   schedule:
     # Daily at 00:30 UTC; adjust as needed
-    - cron: "30 4 * * *"
+    - cron: "30 3 * * *"
   workflow_dispatch:  # allow manual runs
 
 permissions:
@@ -49,10 +49,12 @@ jobs:
 
       - name: Commit and push generated products
         run: |
-          git add imd_gfs_850_hPa_forecast.gif imd_gfs_images/ sounding_plots/
+          git add \
+            imd_gfs_downloads/ \
+            sounding_plots/
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update weather products [skip ci]"
+            git commit -m "Update weather products (3 GFS animations + Skew‑T) [skip ci]"
             git push
           fi
