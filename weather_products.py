@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Combined IMD GFS 850 hPa animation + Indian radiosonde Skew‑T plots.
+Combined IMD GFS 850 hPa animations (3 products) + Indian radiosonde Skew‑T plots.
 
-Outputs:
-  - imd_gfs_850_hPa_forecast.gif  (animation)
-  - sounding_plots/SkewT_XXXXX.png (one per station)
+GFS products:
+  - national
+  - maharashtra
+  - regional
+
+Sounding plots:
+  - SkewT_XXXXX.png for each configured station
 
 Designed to run in CI (GitHub Actions) and commit outputs back to the repo.
 """
 
 from __future__ import annotations
 
-import os
 from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -24,6 +27,9 @@ import pandas as pd
 import requests
 from PIL import Image, ImageDraw
 
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend for CI
+
 import matplotlib.pyplot as plt
 import metpy.calc as mpcalc
 from metpy.plots import SkewT
@@ -31,18 +37,45 @@ from metpy.units import units
 
 
 # ======================================================================
-# CONFIGURATION – GFS ANIMATION
+# CONFIGURATION – GFS ANIMATIONS (3 PRODUCTS)
 # ======================================================================
-
-BASE_URL_GFS = "https://nwp.imd.gov.in/gfs/00/{hour}hGFS1534w850rf.gif"
 
 FORECAST_HOURS = [
     24, 48, 72, 96, 120,
-    144, 168, 192, 210, 216
+    144, 168, 192, 216, 240
 ]
 
-OUTPUT_DIR_GFS = Path("imd_gfs_images")
-OUTPUT_GIF = Path("imd_gfs_850_hPa_forecast.gif")
+PRODUCTS = {
+    "national": {
+        "url_template": (
+            "https://nwp.imd.gov.in/gfs/00/"
+            "{hour}hGFS1534w850rf.gif"
+        ),
+        "output_directory": "national",
+        "animation_file": "imd_gfs_national_850hPa.gif",
+        "label": "IMD GFS National"
+    },
+    "maharashtra": {
+        "url_template": (
+            "https://nwp.imd.gov.in/gfs_ar/00/"
+            "{hour}GFS1534w850rf_maharashtra_state.gif"
+        ),
+        "output_directory": "maharashtra",
+        "animation_file": "imd_gfs_maharashtra_850hPa.gif",
+        "label": "IMD GFS Maharashtra"
+    },
+    "regional": {
+        "url_template": (
+            "https://nwp.imd.gov.in/gfs_ar/00/"
+            "{hour}hGFS1534w850rf.gif"
+        ),
+        "output_directory": "regional",
+        "animation_file": "imd_gfs_regional_850hPa.gif",
+        "label": "IMD GFS Regional"
+    }
+}
+
+BASE_OUTPUT_DIRECTORY_GFS = Path("imd_gfs_downloads")
 
 FRAME_DURATION_MS = 1000
 LOOP = 0
@@ -50,8 +83,6 @@ REQUEST_TIMEOUT = 60
 RETRIES = 3
 
 ADD_LABEL = True
-LABEL_COLOR = "black"
-LABEL_BACKGROUND = "white"
 
 
 # ======================================================================
@@ -76,8 +107,7 @@ SAVE_DIR_SOUNDING = Path("sounding_plots")
 
 def download_image_gfs(url: str, output_path: Path) -> Image.Image:
     """
-    Download one GFS image and save it locally.
-    Returns the decoded PIL Image.
+    Download and decode one GIF image for GFS products.
     """
     headers = {
         "User-Agent": (
@@ -97,9 +127,8 @@ def download_image_gfs(url: str, output_path: Path) -> Image.Image:
             )
             response.raise_for_status()
 
-            content_type = response.headers.get("Content-Type", "")
             if not response.content:
-                raise RuntimeError("The server returned an empty response.")
+                raise RuntimeError("Empty response received.")
 
             image = Image.open(BytesIO(response.content))
             image.load()
@@ -107,30 +136,37 @@ def download_image_gfs(url: str, output_path: Path) -> Image.Image:
             output_path.write_bytes(response.content)
 
             print(
-                f"Downloaded {url} "
-                f"({image.width}x{image.height}, {content_type})"
+                f"Downloaded: {url} "
+                f"({image.width} x {image.height})"
             )
 
             return image.convert("RGBA")
 
         except Exception as error:
             last_error = error
+
             print(
-                f"Attempt {attempt}/{RETRIES} failed for {url}: {error}"
+                f"Attempt {attempt}/{RETRIES} failed:\n"
+                f"  {url}\n"
+                f"  Error: {error}"
             )
 
             if attempt < RETRIES:
                 time.sleep(2)
 
     raise RuntimeError(
-        f"Unable to download image after {RETRIES} attempts: "
+        f"Could not download image after {RETRIES} attempts:\n"
         f"{url}\nLast error: {last_error}"
     )
 
 
-def add_forecast_label(image: Image.Image, forecast_hour: int) -> Image.Image:
+def add_label(
+    image: Image.Image,
+    product_label: str,
+    forecast_hour: int
+) -> Image.Image:
     """
-    Add a small forecast-hour label to the upper-left corner.
+    Add a product and forecast-hour label to the image.
     """
     if not ADD_LABEL:
         return image
@@ -138,28 +174,29 @@ def add_forecast_label(image: Image.Image, forecast_hour: int) -> Image.Image:
     frame = image.convert("RGBA").copy()
     draw = ImageDraw.Draw(frame)
 
-    label = f"IMD GFS 00 UTC | Forecast +{forecast_hour} h"
+    text = f"{product_label} | Forecast +{forecast_hour} h"
 
     try:
-        text_bbox = draw.textbbox((0, 0), label)
-        text_width = text_bbox[2] - text_bbox[0]
-        text_height = text_bbox[3] - text_bbox[1]
+        bbox = draw.textbbox((0, 0), text)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
     except AttributeError:
-        text_width, text_height = draw.textsize(label)
+        text_width, text_height = draw.textsize(text)
 
-    margin = 8
-    box = (
-        margin,
-        margin,
-        margin + text_width + 2 * margin,
-        margin + text_height + 2 * margin
+    padding = 8
+
+    rectangle = (
+        padding,
+        padding,
+        text_width + 3 * padding,
+        text_height + 3 * padding
     )
 
-    draw.rectangle(box, fill=LABEL_BACKGROUND)
+    draw.rectangle(rectangle, fill="white")
     draw.text(
-        (margin * 2, margin * 2),
-        label,
-        fill=LABEL_COLOR
+        (2 * padding, 2 * padding),
+        text,
+        fill="black"
     )
 
     return frame
@@ -167,47 +204,36 @@ def add_forecast_label(image: Image.Image, forecast_hour: int) -> Image.Image:
 
 def normalize_frame_sizes(frames):
     """
-    Make all frames the same size.
+    Make all frames in an animation the same size.
     """
-    width = max(frame.width for frame in frames)
-    height = max(frame.height for frame in frames)
+    max_width = max(frame.width for frame in frames)
+    max_height = max(frame.height for frame in frames)
 
-    normalized = []
+    normalized_frames = []
 
     for frame in frames:
-        canvas = Image.new("RGBA", (width, height), "white")
-        x_offset = (width - frame.width) // 2
-        y_offset = (height - frame.height) // 2
-        canvas.alpha_composite(frame, (x_offset, y_offset))
-        normalized.append(canvas)
+        canvas = Image.new(
+            "RGBA",
+            (max_width, max_height),
+            "white"
+        )
 
-    return normalized
+        x = (max_width - frame.width) // 2
+        y = (max_height - frame.height) // 2
+
+        canvas.alpha_composite(frame, (x, y))
+        normalized_frames.append(canvas)
+
+    return normalized_frames
 
 
-def run_gfs_animation():
-    OUTPUT_DIR_GFS.mkdir(parents=True, exist_ok=True)
-
-    frames = []
-    successful_hours = []
-
-    for forecast_hour in FORECAST_HOURS:
-        url = BASE_URL_GFS.format(hour=forecast_hour)
-        image_path = OUTPUT_DIR_GFS / f"{forecast_hour:03d}h.gif"
-
-        try:
-            image = download_image_gfs(url, image_path)
-            image = add_forecast_label(image, forecast_hour)
-
-            frames.append(image)
-            successful_hours.append(forecast_hour)
-
-        except Exception as error:
-            print(f"Skipping +{forecast_hour} h: {error}")
-
+def create_animation(frames, output_file: Path):
+    """
+    Save a list of PIL images as an animated GIF.
+    """
     if not frames:
         raise RuntimeError(
-            "No images were downloaded. Check the URLs, internet connection, "
-            "or whether the IMD server is available."
+            f"No frames available for {output_file.name}"
         )
 
     frames = normalize_frame_sizes(frames)
@@ -218,7 +244,7 @@ def run_gfs_animation():
     ]
 
     gif_frames[0].save(
-        OUTPUT_GIF,
+        output_file,
         save_all=True,
         append_images=gif_frames[1:],
         duration=FRAME_DURATION_MS,
@@ -227,10 +253,81 @@ def run_gfs_animation():
         disposal=2
     )
 
+
+def process_product(product_name: str, product_config: dict):
+    """
+    Download all frames for one GFS product and create its animation.
+    """
+    product_directory = (
+        BASE_OUTPUT_DIRECTORY_GFS /
+        product_config["output_directory"]
+    )
+
+    product_directory.mkdir(parents=True, exist_ok=True)
+
+    frames = []
+    successful_hours = []
+
     print()
-    print(f"Created animation: {OUTPUT_GIF}")
-    print(f"Frames included: {len(successful_hours)}")
-    print(f"Forecast hours: {successful_hours}")
+    print("=" * 70)
+    print(f"Processing: {product_config['label']}")
+    print("=" * 70)
+
+    for forecast_hour in FORECAST_HOURS:
+        url = product_config["url_template"].format(
+            hour=forecast_hour
+        )
+
+        image_file = (
+            product_directory /
+            f"{forecast_hour:03d}h.gif"
+        )
+
+        try:
+            image = download_image_gfs(url, image_file)
+
+            image = add_label(
+                image=image,
+                product_label=product_config["label"],
+                forecast_hour=forecast_hour
+            )
+
+            frames.append(image)
+            successful_hours.append(forecast_hour)
+
+        except Exception as error:
+            print(
+                f"Skipping {product_name} +{forecast_hour} h:\n"
+                f"{error}"
+            )
+
+    if not frames:
+        print(
+            f"No valid frames downloaded for {product_name}. "
+            "Animation was not created."
+        )
+        return
+
+    animation_file = (
+        BASE_OUTPUT_DIRECTORY_GFS /
+        product_config["animation_file"]
+    )
+
+    create_animation(frames, animation_file)
+
+    print()
+    print(f"Created: {animation_file}")
+    print(f"Frames: {successful_hours}")
+
+
+def run_gfs_animations():
+    BASE_OUTPUT_DIRECTORY_GFS.mkdir(parents=True, exist_ok=True)
+
+    for product_name, product_config in PRODUCTS.items():
+        process_product(product_name, product_config)
+
+    print()
+    print("All GFS product downloads and animations are complete.")
 
 
 # ======================================================================
@@ -664,8 +761,8 @@ def run_sounding_plots():
 
 
 def main():
-    print("=== Running IMD GFS 850 hPa animation ===")
-    run_gfs_animation()
+    print("=== Running IMD GFS 850 hPa animations (3 products) ===")
+    run_gfs_animations()
 
     print("\n=== Running Skew‑T sounding plots ===")
     run_sounding_plots()
