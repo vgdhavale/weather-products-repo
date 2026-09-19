@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Combined IMD GFS 850 hPa animations (3 products) + Indian radiosonde Skew‑T plots.
+IMD GFS animations and Indian radiosonde Skew-T plots.
 
-GFS products:
-  - national
-  - maharashtra
-  - regional
+The program:
 
-Sounding plots:
-  - SkewT_XXXXX.png for each configured station
+1. Downloads the configured IMD GFS image products.
+2. Creates one animated GIF for each product.
+3. Deletes all individual downloaded frames.
+4. Downloads sounding data from the University of Wyoming.
+5. Creates Skew-T PNG files.
+6. Keeps only:
+       - final animation GIF files
+       - final Skew-T PNG files
 
-Designed to run in CI (GitHub Actions) and commit outputs back to the repo.
+Temporary files are deleted automatically.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 from urllib.parse import urlencode
+import shutil
 import time
 
 import numpy as np
@@ -28,7 +33,7 @@ import requests
 from PIL import Image, ImageDraw
 
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend for CI
+matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import metpy.calc as mpcalc
@@ -37,7 +42,7 @@ from metpy.units import units
 
 
 # ======================================================================
-# CONFIGURATION – GFS ANIMATIONS (3 PRODUCTS)
+# CONFIGURATION - GFS ANIMATIONS
 # ======================================================================
 
 FORECAST_HOURS = [
@@ -46,32 +51,67 @@ FORECAST_HOURS = [
 ]
 
 PRODUCTS = {
-    "national": {
+    "national_850hpa": {
         "url_template": (
             "https://nwp.imd.gov.in/gfs/00/"
             "{hour}hGFS1534w850rf.gif"
         ),
-        "output_directory": "national",
         "animation_file": "imd_gfs_national_850hPa.gif",
-        "label": "IMD GFS National"
+        "label": "IMD GFS National 850 hPa"
     },
-    "maharashtra": {
+
+    "maharashtra_850hpa": {
         "url_template": (
             "https://nwp.imd.gov.in/gfs_ar/00/"
             "{hour}GFS1534w850rf_maharashtra_state.gif"
         ),
-        "output_directory": "maharashtra",
         "animation_file": "imd_gfs_maharashtra_850hPa.gif",
-        "label": "IMD GFS Maharashtra"
+        "label": "IMD GFS Maharashtra 850 hPa"
     },
-    "regional": {
+
+    "regional_850hpa": {
         "url_template": (
             "https://nwp.imd.gov.in/gfs_ar/00/"
             "{hour}hGFS1534w850rf.gif"
         ),
-        "output_directory": "regional",
         "animation_file": "imd_gfs_regional_850hPa.gif",
-        "label": "IMD GFS Regional"
+        "label": "IMD GFS Regional 850 hPa"
+    },
+
+    "msl_pressure": {
+        "url_template": (
+            "https://nwp.imd.gov.in/gfs/current/"
+            "{hour}hgfs_mslpin.gif"
+        ),
+        "animation_file": "imd_gfs_msl_pressure.gif",
+        "label": "IMD GFS Mean Sea-Level Pressure"
+    },
+
+    "india_rainfall": {
+        "url_template": (
+            "https://nwp.imd.gov.in/gfs/current/"
+            "{hour}hGFS1534indiarain.gif"
+        ),
+        "animation_file": "imd_gfs_india_rainfall.gif",
+        "label": "IMD GFS India Rainfall"
+    },
+
+    "maximum_temperature": {
+        "url_template": (
+            "https://nwp.imd.gov.in/heatwave/"
+            "{hour}_tx2mbc_gfs.gif"
+        ),
+        "animation_file": "imd_gfs_maximum_temperature.gif",
+        "label": "IMD GFS Maximum Temperature"
+    },
+
+    "minimum_temperature": {
+        "url_template": (
+            "https://nwp.imd.gov.in/heatwave/"
+            "{hour}_tn2mbc_gfs.gif"
+        ),
+        "animation_file": "imd_gfs_minimum_temperature.gif",
+        "label": "IMD GFS Minimum Temperature"
     }
 }
 
@@ -81,12 +121,11 @@ FRAME_DURATION_MS = 1000
 LOOP = 0
 REQUEST_TIMEOUT = 60
 RETRIES = 3
-
 ADD_LABEL = True
 
 
 # ======================================================================
-# CONFIGURATION – SKEW‑T SOUNDINGS
+# CONFIGURATION - SKEW-T SOUNDINGS
 # ======================================================================
 
 STATIONS = {
@@ -101,14 +140,51 @@ SAVE_DIR_SOUNDING = Path("sounding_plots")
 
 
 # ======================================================================
+# GENERAL FILE CLEANUP
+# ======================================================================
+
+def remove_directory_contents(directory: Path):
+    """
+    Remove all files and subdirectories inside a directory.
+    The directory itself is retained.
+    """
+
+    directory.mkdir(parents=True, exist_ok=True)
+
+    for item in directory.iterdir():
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+        except Exception as error:
+            print(f"Could not remove {item}: {error}")
+
+
+def clean_previous_outputs():
+    """
+    Delete previous GFS and Skew-T outputs.
+
+    This prevents old animations or old station plots from remaining
+    when a new run produces fewer files.
+    """
+
+    remove_directory_contents(BASE_OUTPUT_DIRECTORY_GFS)
+    remove_directory_contents(SAVE_DIR_SOUNDING)
+
+
+# ======================================================================
 # GFS DOWNLOAD FUNCTIONS
 # ======================================================================
 
-
 def download_image_gfs(url: str, output_path: Path) -> Image.Image:
     """
-    Download and decode one GIF image for GFS products.
+    Download and decode one IMD GIF image.
+
+    The image is temporarily saved to output_path and deleted after
+    the animation is created.
     """
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (compatible; IMD-GFS-downloader/1.0; "
@@ -125,6 +201,7 @@ def download_image_gfs(url: str, output_path: Path) -> Image.Image:
                 headers=headers,
                 timeout=REQUEST_TIMEOUT
             )
+
             response.raise_for_status()
 
             if not response.content:
@@ -147,7 +224,7 @@ def download_image_gfs(url: str, output_path: Path) -> Image.Image:
 
             print(
                 f"Attempt {attempt}/{RETRIES} failed:\n"
-                f"  {url}\n"
+                f"  URL: {url}\n"
                 f"  Error: {error}"
             )
 
@@ -166,8 +243,9 @@ def add_label(
     forecast_hour: int
 ) -> Image.Image:
     """
-    Add a product and forecast-hour label to the image.
+    Add product name and forecast-hour label to an image.
     """
+
     if not ADD_LABEL:
         return image
 
@@ -204,8 +282,9 @@ def add_label(
 
 def normalize_frame_sizes(frames):
     """
-    Make all frames in an animation the same size.
+    Make all frames in an animation have the same dimensions.
     """
+
     max_width = max(frame.width for frame in frames)
     max_height = max(frame.height for frame in frames)
 
@@ -229,8 +308,9 @@ def normalize_frame_sizes(frames):
 
 def create_animation(frames, output_file: Path):
     """
-    Save a list of PIL images as an animated GIF.
+    Save PIL images as one animated GIF.
     """
+
     if not frames:
         raise RuntimeError(
             f"No frames available for {output_file.name}"
@@ -256,86 +336,123 @@ def create_animation(frames, output_file: Path):
 
 def process_product(product_name: str, product_config: dict):
     """
-    Download all frames for one GFS product and create its animation.
+    Download frames for one product, create its animation, and remove
+    all temporary frame files.
     """
-    product_directory = (
+
+    temporary_directory = (
         BASE_OUTPUT_DIRECTORY_GFS /
-        product_config["output_directory"]
+        "temporary_frames" /
+        product_name
     )
 
-    product_directory.mkdir(parents=True, exist_ok=True)
+    temporary_directory.mkdir(parents=True, exist_ok=True)
 
     frames = []
     successful_hours = []
 
     print()
-    print("=" * 70)
+    print("=" * 80)
     print(f"Processing: {product_config['label']}")
-    print("=" * 70)
+    print("=" * 80)
 
-    for forecast_hour in FORECAST_HOURS:
-        url = product_config["url_template"].format(
-            hour=forecast_hour
-        )
-
-        image_file = (
-            product_directory /
-            f"{forecast_hour:03d}h.gif"
-        )
-
-        try:
-            image = download_image_gfs(url, image_file)
-
-            image = add_label(
-                image=image,
-                product_label=product_config["label"],
-                forecast_hour=forecast_hour
+    try:
+        for forecast_hour in FORECAST_HOURS:
+            url = product_config["url_template"].format(
+                hour=forecast_hour
             )
 
-            frames.append(image)
-            successful_hours.append(forecast_hour)
+            temporary_file = (
+                temporary_directory /
+                f"{forecast_hour:03d}h.gif"
+            )
 
-        except Exception as error:
+            try:
+                image = download_image_gfs(
+                    url=url,
+                    output_path=temporary_file
+                )
+
+                image = add_label(
+                    image=image,
+                    product_label=product_config["label"],
+                    forecast_hour=forecast_hour
+                )
+
+                frames.append(image)
+                successful_hours.append(forecast_hour)
+
+            except Exception as error:
+                print(
+                    f"Skipping {product_name} "
+                    f"+{forecast_hour} h:\n{error}"
+                )
+
+        if not frames:
             print(
-                f"Skipping {product_name} +{forecast_hour} h:\n"
-                f"{error}"
+                f"No valid frames downloaded for {product_name}. "
+                "Animation was not created."
             )
+            return
 
-    if not frames:
-        print(
-            f"No valid frames downloaded for {product_name}. "
-            "Animation was not created."
+        animation_file = (
+            BASE_OUTPUT_DIRECTORY_GFS /
+            product_config["animation_file"]
         )
-        return
 
-    animation_file = (
-        BASE_OUTPUT_DIRECTORY_GFS /
-        product_config["animation_file"]
-    )
+        create_animation(frames, animation_file)
 
-    create_animation(frames, animation_file)
+        print()
+        print(f"Created: {animation_file}")
+        print(f"Frames included: {successful_hours}")
 
-    print()
-    print(f"Created: {animation_file}")
-    print(f"Frames: {successful_hours}")
+    finally:
+        # Delete all individual downloaded frames.
+        if temporary_directory.exists():
+            shutil.rmtree(temporary_directory)
+            print(
+                f"Deleted temporary frames for "
+                f"{product_name}"
+            )
 
 
 def run_gfs_animations():
-    BASE_OUTPUT_DIRECTORY_GFS.mkdir(parents=True, exist_ok=True)
+    """
+    Create all configured GFS animations.
+    """
+
+    BASE_OUTPUT_DIRECTORY_GFS.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     for product_name, product_config in PRODUCTS.items():
         process_product(product_name, product_config)
 
+    # Delete the temporary parent directory if it is empty.
+    temporary_parent = BASE_OUTPUT_DIRECTORY_GFS / "temporary_frames"
+
+    if temporary_parent.exists():
+        try:
+            temporary_parent.rmdir()
+        except OSError:
+            shutil.rmtree(temporary_parent)
+
     print()
-    print("All GFS product downloads and animations are complete.")
+    print("All GFS animations are complete.")
 
 
 # ======================================================================
-# SKEW‑T SOUNDING FUNCTIONS
+# SKEW-T SOUNDING FUNCTIONS
 # ======================================================================
 
+def build_url_sounding(
+    dt: datetime,
+    station_number: int,
+    src: str = "BUFR",
+    out_type: str = "TEXT:CSV"
+) -> str:
 
-def build_url_sounding(dt: datetime, station_number: int, src: str = "BUFR", out_type: str = "TEXT:CSV") -> str:
     params = {
         "datetime": dt.strftime("%Y-%m-%d %H:%M:%S"),
         "id": str(station_number),
@@ -349,13 +466,24 @@ def build_url_sounding(dt: datetime, station_number: int, src: str = "BUFR", out
     )
 
 
-def try_download_sounding(dt: datetime, station_number: int, src: str):
-    url = build_url_sounding(dt, station_number, src=src)
+def try_download_sounding(
+    dt: datetime,
+    station_number: int,
+    src: str
+):
+    url = build_url_sounding(
+        dt,
+        station_number,
+        src=src
+    )
 
     try:
-        response = requests.get(url, timeout=30)
-    except requests.RequestException as exc:
-        return None, url, f"Request error: {exc}"
+        response = requests.get(
+            url,
+            timeout=30
+        )
+    except requests.RequestException as error:
+        return None, url, f"Request error: {error}"
 
     if not response.ok:
         return None, url, f"HTTP {response.status_code}"
@@ -373,8 +501,8 @@ def try_download_sounding(dt: datetime, station_number: int, src: str):
             StringIO(text),
             skipinitialspace=True
         )
-    except Exception as exc:
-        return None, url, f"CSV parsing error: {exc}"
+    except Exception as error:
+        return None, url, f"CSV parsing error: {error}"
 
     if df.empty:
         return None, url, "Parsed empty CSV"
@@ -382,14 +510,35 @@ def try_download_sounding(dt: datetime, station_number: int, src: str):
     return df, url, None
 
 
-def fetch_with_fallbacks_sounding(station_number: int, base_date: date):
+def fetch_with_fallbacks_sounding(
+    station_number: int,
+    base_date: date
+):
     candidate_times = [
-        datetime(base_date.year, base_date.month, base_date.day, 0),
-        datetime(base_date.year, base_date.month, base_date.day, 12),
-        datetime(base_date.year, base_date.month, base_date.day, 0)
-        - timedelta(days=1),
-        datetime(base_date.year, base_date.month, base_date.day, 12)
-        - timedelta(days=1),
+        datetime(
+            base_date.year,
+            base_date.month,
+            base_date.day,
+            0
+        ),
+        datetime(
+            base_date.year,
+            base_date.month,
+            base_date.day,
+            12
+        ),
+        datetime(
+            base_date.year,
+            base_date.month,
+            base_date.day,
+            0
+        ) - timedelta(days=1),
+        datetime(
+            base_date.year,
+            base_date.month,
+            base_date.day,
+            12
+        ) - timedelta(days=1),
     ]
 
     expanded_times = []
@@ -411,9 +560,9 @@ def fetch_with_fallbacks_sounding(station_number: int, base_date: date):
     for dt in ordered_times:
         for src in ["BUFR", "FM35"]:
             df, url, error = try_download_sounding(
-                dt,
-                station_number,
-                src
+                dt=dt,
+                station_number=station_number,
+                src=src
             )
 
             status = error if error else "OK"
@@ -432,10 +581,15 @@ def fetch_with_fallbacks_sounding(station_number: int, base_date: date):
     )
 
 
-def format_quantity(value, unit, decimals=0):
+def format_quantity(
+    value,
+    unit,
+    decimals=0
+):
     """
-    Safely format a MetPy quantity. Returns '--' for missing values.
+    Safely format a MetPy quantity.
     """
+
     if value is None:
         return "--"
 
@@ -447,7 +601,7 @@ def format_quantity(value, unit, decimals=0):
 
 
 def calculate_sounding_parameters(df: pd.DataFrame):
-    required_cols = [
+    required_columns = [
         "pressure_hPa",
         "geopotential height_m",
         "temperature_C",
@@ -456,97 +610,157 @@ def calculate_sounding_parameters(df: pd.DataFrame):
         "wind speed_m/s",
     ]
 
-    missing_cols = [
-        col for col in required_cols
-        if col not in df.columns
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in df.columns
     ]
 
-    if missing_cols:
+    if missing_columns:
         raise ValueError(
-            f"Missing columns: {missing_cols}"
+            f"Missing columns: {missing_columns}"
         )
 
-    df = df.dropna(subset=required_cols).copy()
+    df = df.dropna(
+        subset=required_columns
+    ).copy()
+
     df = df[df["pressure_hPa"] > 0]
-    df = df.drop_duplicates(subset="pressure_hPa")
-    df = df.sort_values("pressure_hPa", ascending=False).reset_index(drop=True)
+    df = df.drop_duplicates(
+        subset="pressure_hPa"
+    )
+    df = df.sort_values(
+        "pressure_hPa",
+        ascending=False
+    ).reset_index(drop=True)
 
     if len(df) < 3:
         raise ValueError(
             "Not enough valid levels for sounding calculations."
         )
 
-    p = df["pressure_hPa"].to_numpy() * units.hPa
-    temperature = df["temperature_C"].to_numpy() * units.degC
-    dewpoint = df["dew point temperature_C"].to_numpy() * units.degC
-    wind_direction = df["wind direction_degree"].to_numpy() * units.degrees
-    wind_speed = df["wind speed_m/s"].to_numpy() * units("m/s")
+    pressure = df["pressure_hPa"].to_numpy() * units.hPa
+    temperature = (
+        df["temperature_C"].to_numpy() *
+        units.degC
+    )
+    dewpoint = (
+        df["dew point temperature_C"].to_numpy() *
+        units.degC
+    )
+    wind_direction = (
+        df["wind direction_degree"].to_numpy() *
+        units.degrees
+    )
+    wind_speed = (
+        df["wind speed_m/s"].to_numpy() *
+        units("m/s")
+    )
 
-    u, v = mpcalc.wind_components(wind_speed, wind_direction)
+    u, v = mpcalc.wind_components(
+        wind_speed,
+        wind_direction
+    )
 
     parcel_profile = mpcalc.parcel_profile(
-        p,
+        pressure,
         temperature[0],
         dewpoint[0]
     ).to("degC")
 
-    lcl_p, lcl_t = mpcalc.lcl(p[0], temperature[0], dewpoint[0])
+    lcl_pressure, lcl_temperature = mpcalc.lcl(
+        pressure[0],
+        temperature[0],
+        dewpoint[0]
+    )
 
     try:
-        lfc_p, lfc_t = mpcalc.lfc(p, temperature, dewpoint)
+        lfc_pressure, lfc_temperature = mpcalc.lfc(
+            pressure,
+            temperature,
+            dewpoint
+        )
     except Exception:
-        lfc_p, lfc_t = None, None
+        lfc_pressure, lfc_temperature = None, None
 
     try:
-        el_p, el_t = mpcalc.el(p, temperature, dewpoint, parcel_profile)
+        el_pressure, el_temperature = mpcalc.el(
+            pressure,
+            temperature,
+            dewpoint,
+            parcel_profile
+        )
     except Exception:
-        el_p, el_t = None, None
+        el_pressure, el_temperature = None, None
 
     try:
-        ccl_p, ccl_t, t_c = mpcalc.ccl(p, temperature, dewpoint)
+        ccl_pressure, ccl_temperature, convective_temperature = (
+            mpcalc.ccl(
+                pressure,
+                temperature,
+                dewpoint
+            )
+        )
+
         if (
-            np.isnan(ccl_p.magnitude)
-            or np.isnan(ccl_t.magnitude)
-            or np.isnan(t_c.magnitude)
+            np.isnan(ccl_pressure.magnitude)
+            or np.isnan(ccl_temperature.magnitude)
+            or np.isnan(convective_temperature.magnitude)
         ):
-            ccl_p, ccl_t, t_c = None, None, None
+            ccl_pressure = None
+            ccl_temperature = None
+            convective_temperature = None
+
     except Exception:
-        ccl_p, ccl_t, t_c = None, None, None
+        ccl_pressure = None
+        ccl_temperature = None
+        convective_temperature = None
 
     try:
-        cape, cin = mpcalc.cape_cin(p, temperature, dewpoint, parcel_profile)
+        cape, cin = mpcalc.cape_cin(
+            pressure,
+            temperature,
+            dewpoint,
+            parcel_profile
+        )
     except Exception:
-        cape, cin = np.nan * units("J/kg"), np.nan * units("J/kg")
+        cape = np.nan * units("J/kg")
+        cin = np.nan * units("J/kg")
 
     try:
         u_shear, v_shear = mpcalc.bulk_shear(
-            p,
+            pressure,
             u,
             v,
             bottom=900 * units.hPa,
             depth=500 * units.hPa
         )
-        bulk_shear = mpcalc.wind_speed(u_shear, v_shear).to("knot")
+
+        bulk_shear = mpcalc.wind_speed(
+            u_shear,
+            v_shear
+        ).to("knot")
+
     except Exception:
         bulk_shear = np.nan * units.knot
 
     return {
         "df": df,
-        "p": p,
+        "p": pressure,
         "temperature": temperature,
         "dewpoint": dewpoint,
         "u": u,
         "v": v,
         "parcel_profile": parcel_profile,
-        "lcl_p": lcl_p,
-        "lcl_t": lcl_t,
-        "lfc_p": lfc_p,
-        "lfc_t": lfc_t,
-        "el_p": el_p,
-        "el_t": el_t,
-        "ccl_p": ccl_p,
-        "ccl_t": ccl_t,
-        "t_c": t_c,
+        "lcl_p": lcl_pressure,
+        "lcl_t": lcl_temperature,
+        "lfc_p": lfc_pressure,
+        "lfc_t": lfc_temperature,
+        "el_p": el_pressure,
+        "el_t": el_temperature,
+        "ccl_p": ccl_pressure,
+        "ccl_t": ccl_temperature,
+        "t_c": convective_temperature,
         "cape": cape,
         "cin": cin,
         "bulk_shear": bulk_shear,
@@ -556,103 +770,197 @@ def calculate_sounding_parameters(df: pd.DataFrame):
 def plot_sounding(
     station_number: str,
     station_name: str,
-    used_dt: datetime,
-    used_src: str,
+    used_datetime: datetime,
+    used_source: str,
     source_url: str,
     sounding: dict,
-    save_dir: Path
+    save_directory: Path
 ):
-    p = sounding["p"]
+    pressure = sounding["p"]
     temperature = sounding["temperature"]
     dewpoint = sounding["dewpoint"]
     parcel_profile = sounding["parcel_profile"]
     u = sounding["u"]
     v = sounding["v"]
 
-    lcl_p = sounding["lcl_p"]
-    lcl_t = sounding["lcl_t"]
-    lfc_p = sounding["lfc_p"]
-    lfc_t = sounding["lfc_t"]
-    el_p = sounding["el_p"]
-    el_t = sounding["el_t"]
-    ccl_p = sounding["ccl_p"]
-    ccl_t = sounding["ccl_t"]
-    t_c = sounding["t_c"]
+    lcl_pressure = sounding["lcl_p"]
+    lcl_temperature = sounding["lcl_t"]
+    lfc_pressure = sounding["lfc_p"]
+    lfc_temperature = sounding["lfc_t"]
+    el_pressure = sounding["el_p"]
+    el_temperature = sounding["el_t"]
+    ccl_pressure = sounding["ccl_p"]
+    ccl_temperature = sounding["ccl_t"]
+    convective_temperature = sounding["t_c"]
+
     cape = sounding["cape"]
     cin = sounding["cin"]
     bulk_shear = sounding["bulk_shear"]
 
-    fig = plt.figure(figsize=(10, 10))
-    skew = SkewT(fig, rotation=30)
+    figure = plt.figure(figsize=(10, 10))
+    skew = SkewT(
+        figure,
+        rotation=30
+    )
 
-    skew.plot(p, temperature, "r", linewidth=2, label="Temperature")
-    skew.plot(p, dewpoint, "g", linewidth=2, label="Dewpoint")
-    skew.plot(p, parcel_profile, "k", linewidth=2, label="Parcel")
+    skew.plot(
+        pressure,
+        temperature,
+        "r",
+        linewidth=2,
+        label="Temperature"
+    )
 
-    skew.plot(lcl_p, lcl_t, "ko", markersize=7, label="LCL")
+    skew.plot(
+        pressure,
+        dewpoint,
+        "g",
+        linewidth=2,
+        label="Dewpoint"
+    )
 
-    if lfc_p is not None:
+    skew.plot(
+        pressure,
+        parcel_profile,
+        "k",
+        linewidth=2,
+        label="Parcel"
+    )
+
+    skew.plot(
+        lcl_pressure,
+        lcl_temperature,
+        "ko",
+        markersize=7,
+        label="LCL"
+    )
+
+    if lfc_pressure is not None:
         skew.plot(
-            lfc_p, lfc_t, "bo",
-            markerfacecolor="blue", markersize=7, label="LFC"
+            lfc_pressure,
+            lfc_temperature,
+            "bo",
+            markerfacecolor="blue",
+            markersize=7,
+            label="LFC"
         )
 
-    if el_p is not None:
+    if el_pressure is not None:
         skew.plot(
-            el_p, el_t, "mo",
-            markerfacecolor="magenta", markersize=7, label="EL"
+            el_pressure,
+            el_temperature,
+            "mo",
+            markerfacecolor="magenta",
+            markersize=7,
+            label="EL"
         )
 
-    if ccl_p is not None:
+    if ccl_pressure is not None:
         skew.plot(
-            ccl_p, ccl_t, marker="D",
-            color="orange", markersize=7, label="CCL"
+            ccl_pressure,
+            ccl_temperature,
+            marker="D",
+            color="orange",
+            markersize=7,
+            label="CCL"
         )
 
-    step = max(1, len(p) // 60)
+    step = max(
+        1,
+        len(pressure) // 60
+    )
+
     skew.plot_barbs(
-        p[::step],
+        pressure[::step],
         u[::step].to("knot"),
         v[::step].to("knot")
     )
 
     try:
-        skew.shade_cape(p, temperature, parcel_profile)
-        skew.shade_cin(p, temperature, parcel_profile, dewpoint)
-    except Exception as exc:
-        print(f"{station_name}: shading skipped: {exc}")
+        skew.shade_cape(
+            pressure,
+            temperature,
+            parcel_profile
+        )
 
-    skew.ax.set_ylim(1000, 80)
-    skew.ax.set_xlim(-50, 50)
-    skew.ax.axvline(0, color="c", linestyle="--", linewidth=1)
+        skew.shade_cin(
+            pressure,
+            temperature,
+            parcel_profile,
+            dewpoint
+        )
+
+    except Exception as error:
+        print(
+            f"{station_name}: "
+            f"shading skipped: {error}"
+        )
+
+    skew.ax.set_ylim(
+        1000,
+        80
+    )
+
+    skew.ax.set_xlim(
+        -50,
+        50
+    )
+
+    skew.ax.axvline(
+        0,
+        color="c",
+        linestyle="--",
+        linewidth=1
+    )
 
     skew.plot_dry_adiabats(alpha=0.5)
     skew.plot_moist_adiabats(alpha=0.5)
     skew.plot_mixing_lines(alpha=0.5)
 
-    cape_text = format_quantity(cape, "J/kg", decimals=0)
-    cin_text = format_quantity(cin, "J/kg", decimals=0)
+    cape_text = format_quantity(
+        cape,
+        "J/kg",
+        decimals=0
+    )
+
+    cin_text = format_quantity(
+        cin,
+        "J/kg",
+        decimals=0
+    )
+
     lcl_text = (
-        f"{lcl_p.to('hPa').magnitude:.0f} hPa / "
-        f"{lcl_t.to('degC').magnitude:.1f} °C"
+        f"{lcl_pressure.to('hPa').magnitude:.0f} hPa / "
+        f"{lcl_temperature.to('degC').magnitude:.1f} °C"
     )
+
     lfc_text = (
-        f"{lfc_p.to('hPa').magnitude:.0f} hPa / "
-        f"{lfc_t.to('degC').magnitude:.1f} °C"
-        if lfc_p is not None else "Not found"
+        f"{lfc_pressure.to('hPa').magnitude:.0f} hPa / "
+        f"{lfc_temperature.to('degC').magnitude:.1f} °C"
+        if lfc_pressure is not None
+        else "Not found"
     )
+
     el_text = (
-        f"{el_p.to('hPa').magnitude:.0f} hPa / "
-        f"{el_t.to('degC').magnitude:.1f} °C"
-        if el_p is not None else "Not found"
+        f"{el_pressure.to('hPa').magnitude:.0f} hPa / "
+        f"{el_temperature.to('degC').magnitude:.1f} °C"
+        if el_pressure is not None
+        else "Not found"
     )
+
     ccl_text = (
-        f"{ccl_p.to('hPa').magnitude:.0f} hPa / "
-        f"{ccl_t.to('degC').magnitude:.1f} °C / "
-        f"Tconv {t_c.to('degC').magnitude:.1f} °C"
-        if ccl_p is not None else "Not found"
+        f"{ccl_pressure.to('hPa').magnitude:.0f} hPa / "
+        f"{ccl_temperature.to('degC').magnitude:.1f} °C / "
+        f"Tconv {convective_temperature.to('degC').magnitude:.1f} °C"
+        if ccl_pressure is not None
+        else "Not found"
     )
-    shear_text = format_quantity(bulk_shear, "knot", decimals=1)
+
+    shear_text = format_quantity(
+        bulk_shear,
+        "knot",
+        decimals=1
+    )
 
     parameter_text = (
         f"CAPE: {cape_text}\n"
@@ -665,7 +973,9 @@ def plot_sounding(
     )
 
     skew.ax.text(
-        0.98, 0.98, parameter_text,
+        0.98,
+        0.98,
+        parameter_text,
         transform=skew.ax.transAxes,
         verticalalignment="top",
         horizontalalignment="right",
@@ -680,94 +990,207 @@ def plot_sounding(
         zorder=10
     )
 
-    skew.ax.legend(loc="lower left", fontsize=9)
+    skew.ax.legend(
+        loc="lower left",
+        fontsize=9
+    )
 
     plt.title(
         f"{station_name} ({station_number})\n"
-        f"Skew-T: {used_dt:%Y-%m-%d %H:%M UTC} ({used_src})",
+        f"Skew-T: "
+        f"{used_datetime:%Y-%m-%d %H:%M UTC} "
+        f"({used_source})",
         fontsize=13
     )
 
     plt.tight_layout()
 
-    outfile = save_dir / f"SkewT_{station_number}.png"
-    plt.savefig(outfile, dpi=300, bbox_inches="tight")
-    print(f"Saved: {outfile}")
+    output_file = (
+        save_directory /
+        f"SkewT_{station_number}.png"
+    )
+
+    plt.savefig(
+        output_file,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    print(f"Saved: {output_file}")
     print(f"Source URL: {source_url}")
 
-    plt.close(fig)
+    plt.close(figure)
 
 
 def run_sounding_plots():
-    SAVE_DIR_SOUNDING.mkdir(parents=True, exist_ok=True)
+    """
+    Create Skew-T files.
+
+    Only final PNG files are kept in sounding_plots.
+    """
+
+    SAVE_DIR_SOUNDING.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     base_date = date.today()
 
     for station_number, station_name in STATIONS.items():
-        print("\n" + "=" * 70)
-        print(f"Processing {station_name} ({station_number})")
-        print("=" * 70)
+        print()
+        print("=" * 80)
+        print(
+            f"Processing {station_name} "
+            f"({station_number})"
+        )
+        print("=" * 80)
 
         try:
-            df, used_dt, used_src, source_url = fetch_with_fallbacks_sounding(
-                int(station_number),
-                base_date
+            (
+                dataframe,
+                used_datetime,
+                used_source,
+                source_url
+            ) = fetch_with_fallbacks_sounding(
+                station_number=int(station_number),
+                base_date=base_date
             )
 
-            sounding = calculate_sounding_parameters(df)
+            sounding = calculate_sounding_parameters(
+                dataframe
+            )
 
             plot_sounding(
                 station_number=station_number,
                 station_name=station_name,
-                used_dt=used_dt,
-                used_src=used_src,
+                used_datetime=used_datetime,
+                used_source=used_source,
                 source_url=source_url,
                 sounding=sounding,
-                save_dir=SAVE_DIR_SOUNDING
+                save_directory=SAVE_DIR_SOUNDING
             )
 
-            print(f"CAPE: {sounding['cape'].to('J/kg')}")
-            print(f"CIN: {sounding['cin'].to('J/kg')}")
-            print(f"LCL: {sounding['lcl_p'].to('hPa')}")
+            print(
+                f"CAPE: "
+                f"{sounding['cape'].to('J/kg')}"
+            )
+
+            print(
+                f"CIN: "
+                f"{sounding['cin'].to('J/kg')}"
+            )
+
+            print(
+                f"LCL: "
+                f"{sounding['lcl_p'].to('hPa')}"
+            )
 
             if sounding["lfc_p"] is not None:
-                print(f"LFC: {sounding['lfc_p'].to('hPa')}")
+                print(
+                    f"LFC: "
+                    f"{sounding['lfc_p'].to('hPa')}"
+                )
             else:
                 print("LFC: Not found")
 
             if sounding["el_p"] is not None:
-                print(f"EL: {sounding['el_p'].to('hPa')}")
+                print(
+                    f"EL: "
+                    f"{sounding['el_p'].to('hPa')}"
+                )
             else:
                 print("EL: Not found")
 
             if sounding["ccl_p"] is not None:
                 print(
-                    f"CCL: {sounding['ccl_p'].to('hPa')} / "
+                    f"CCL: "
+                    f"{sounding['ccl_p'].to('hPa')} / "
                     f"{sounding['ccl_t'].to('degC')} / "
-                    f"Convective T: {sounding['t_c'].to('degC')}"
+                    f"Convective temperature: "
+                    f"{sounding['t_c'].to('degC')}"
                 )
             else:
                 print("CCL: Not found")
 
-            print(f"0–500 hPa bulk shear: {sounding['bulk_shear'].to('knot')}")
+            print(
+                f"0–500 hPa bulk shear: "
+                f"{sounding['bulk_shear'].to('knot')}"
+            )
 
-        except Exception as exc:
-            print(f"ERROR for {station_name} ({station_number}): {exc}")
+        except Exception as error:
+            print(
+                f"ERROR for {station_name} "
+                f"({station_number}): {error}"
+            )
+
+
+# ======================================================================
+# FINAL CLEANUP
+# ======================================================================
+
+def final_cleanup():
+    """
+    Ensure that only animations and Skew-T files remain.
+
+    Remaining allowed files:
+        imd_gfs_downloads/*.gif
+        sounding_plots/*.png
+    """
+
+    # Remove any unexpected GFS subdirectories.
+    if BASE_OUTPUT_DIRECTORY_GFS.exists():
+        for item in BASE_OUTPUT_DIRECTORY_GFS.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item)
+
+            elif item.suffix.lower() != ".gif":
+                item.unlink()
+
+    # Remove any unexpected files from sounding_plots.
+    if SAVE_DIR_SOUNDING.exists():
+        for item in SAVE_DIR_SOUNDING.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item)
+
+            elif item.suffix.lower() != ".png":
+                item.unlink()
+
+    print()
+    print("Final cleanup complete.")
+    print("Kept only animation GIF files and Skew-T PNG files.")
 
 
 # ======================================================================
 # MAIN
 # ======================================================================
 
-
 def main():
-    print("=== Running IMD GFS 850 hPa animations (3 products) ===")
+    print(
+        "=== Cleaning previous outputs ==="
+    )
+
+    clean_previous_outputs()
+
+    print(
+        "\n=== Creating IMD GFS animations ==="
+    )
+
     run_gfs_animations()
 
-    print("\n=== Running Skew‑T sounding plots ===")
+    print(
+        "\n=== Creating Skew-T sounding plots ==="
+    )
+
     run_sounding_plots()
 
-    print("\nAll products generated.")
+    print(
+        "\n=== Removing all non-final files ==="
+    )
+
+    final_cleanup()
+
+    print()
+    print("All products generated successfully.")
 
 
 if __name__ == "__main__":
