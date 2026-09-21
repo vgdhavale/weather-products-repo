@@ -1,20 +1,19 @@
-name: Generate weather products (GFS + Skew‑T)
+name: IMD GFS + Skew-T → GitHub Pages
 
 on:
-  schedule:
-    # Daily at 00:30 UTC; adjust as needed
-    - cron: "30 3 * * *"
-  workflow_dispatch:  # allow manual runs
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '0 6 * * *'  # optional: daily at 06:00 UTC
 
 permissions:
-  contents: read # Securely downgraded from write since we are no longer pushing code
+  contents: write
 
 jobs:
-  generate:
+  generate-and-push-pages:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -22,32 +21,61 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install system dependencies (for Matplotlib)
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             python3-dev \
-            libfreetype6-dev \
-            libpng-dev \
-            pkg-config
+            gfortran \
+            libatlas-base-dev \
+            libopenblas-dev
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install --no-cache-dir -r requirements.txt
+          pip install --no-cache-dir \
+            numpy pandas requests Pillow matplotlib metpy scipy
 
-      - name: Run weather products script
+      - name: Run IMD GFS + Skew-T generator
         run: |
-          python weather_products.py
+          python your_script_name.py
+        # Replace your_script_name.py with the actual filename
 
-      - name: Upload Weather Products as Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: weather-forecast-products
-          path: |
-            imd_gfs_850_hPa_forecast.gif
-            imd_gfs_images/
-            sounding_plots/
-          retention-days: 7 # Optional: Adjust or remove this to change how long GitHub stores the files (default is 90 days)
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare files for GitHub Pages
+        run: |
+          # Create folders for Pages
+          mkdir -p gfs skewt
+
+          # Copy final GIFs
+          if ls imd_gfs_downloads/*.gif 1>/dev/null 2>&1; then
+            cp -f imd_gfs_downloads/*.gif gfs/
+          else
+            echo "No GFS GIFs found"
+          fi
+
+          # Copy final Skew-T PNGs
+          if ls sounding_plots/*.png 1>/dev/null 2>&1; then
+            cp -f sounding_plots/*.png skewt/
+          else
+            echo "No Skew-T PNGs found"
+          fi
+
+      - name: Commit and push outputs to main (for Pages)
+        run: |
+          # Stage only the web assets
+          git add gfs/*.gif skewt/*.png || true
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Update weather Pages assets: $(date -u +%Y-%m-%d_%H%M)_UTC"
+            git push
+          else
+            echo "No new or changed files to commit."
+          fi
