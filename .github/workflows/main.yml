@@ -7,7 +7,7 @@ on:
   workflow_dispatch:  # allow manual runs
 
 permissions:
-  contents: write
+  contents: read # Securely downgraded from write since we are no longer pushing code
 
 jobs:
   generate:
@@ -42,17 +42,12 @@ jobs:
         run: |
           python weather_products.py
 
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Commit and push generated products
-        run: |
-          git add imd_gfs_850_hPa_forecast.gif imd_gfs_images/ sounding_plots/
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "Update weather products [skip ci]"
-            git push
-          fi
+      - name: Upload Weather Products as Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-forecast-products
+          path: |
+            imd_gfs_850_hPa_forecast.gif
+            imd_gfs_images/
+            sounding_plots/
+          retention-days: 7 # Optional: Adjust or remove this to change how long GitHub stores the files (default is 90 days)
