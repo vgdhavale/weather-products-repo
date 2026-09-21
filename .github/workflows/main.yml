@@ -1,4 +1,4 @@
-name: IMD GFS + Skew-T → GitHub Pages
+name: Deploy IMD GFS + Skew-T to GitHub Pages
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  generate-and-push-pages:
+  generate-and-deploy-pages:
     runs-on: ubuntu-latest
 
     steps:
@@ -42,40 +42,35 @@ jobs:
       - name: Run IMD GFS + Skew-T generator
         run: |
           python weather_products.py
-        # Replace weather_products.py with the actual filename
-
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+        # Replace weather_products.py with your actual script filename
 
       - name: Prepare files for GitHub Pages
         run: |
-          # Create folders for Pages
-          mkdir -p gfs skewt
+          # Create output folder for Pages
+          mkdir -p public/gfs public/skewt
 
-          # Copy final GIFs
+          # Copy final GFS GIFs
           if ls imd_gfs_downloads/*.gif 1>/dev/null 2>&1; then
-            cp -f imd_gfs_downloads/*.gif gfs/
+            cp -f imd_gfs_downloads/*.gif public/gfs/
           else
             echo "No GFS GIFs found"
           fi
 
           # Copy final Skew-T PNGs
           if ls sounding_plots/*.png 1>/dev/null 2>&1; then
-            cp -f sounding_plots/*.png skewt/
+            cp -f sounding_plots/*.png public/skewt/
           else
             echo "No Skew-T PNGs found"
           fi
 
-      - name: Commit and push outputs to main (for Pages)
-        run: |
-          # Stage only the web assets
-          git add gfs/*.gif skewt/*.png || true
-
-          if ! git diff --cached --quiet; then
-            git commit -m "Update weather Pages assets: $(date -u +%Y-%m-%d_%H%M)_UTC"
-            git push
-          else
-            echo "No new or changed files to commit."
-          fi
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
+          user_name: "github-actions[bot]"
+          user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_message: "Deploy weather products (GFS + Skew-T)"
+          keep_files: false
+          # keep_files: true  # if you want to preserve other files already on gh-pages
