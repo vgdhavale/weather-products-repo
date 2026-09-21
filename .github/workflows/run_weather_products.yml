@@ -43,20 +43,101 @@ jobs:
         run: |
           python weather_products.py
 
-      # NEW: Consolidate files into a single web directory
+      # Organize web assets: only final GIFs and PNGs
       - name: Organize web assets
         run: |
-          mkdir -p public
-          mv imd_gfs_850_hPa_forecast.gif public/
-          mv imd_gfs_images public/
-          mv sounding_plots public/
+          set -e
 
-      # NEW: Upload the website directory artifact
+          mkdir -p public/gfs
+          mkdir -p public/skewt
+
+          # Copy all final GFS animation GIFs
+          if [ -d imd_gfs_downloads ]; then
+            find imd_gfs_downloads -maxdepth 1 -type f -name "*.gif" -exec cp {} public/gfs/ \;
+          else
+            echo "Warning: imd_gfs_downloads directory not found"
+          fi
+
+          # Copy all final Skew-T PNGs
+          if [ -d sounding_plots ]; then
+            cp sounding_plots/*.png public/skewt/ || true
+          else
+            echo "Warning: sounding_plots directory not found"
+          fi
+
+          # Optional: create a simple index.html listing the files
+          cat > public/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <title>IMD GFS & Skew-T Products</title>
+            <style>
+              body { font-family: sans-serif; margin: 20px; }
+              h2 { margin-top: 1.5em; }
+              img { max-width: 100%; height: auto; border: 1px solid #ccc; margin: 6px 0; }
+            </style>
+          </head>
+          <body>
+            <h1>IMD GFS & Skew-T Products</h1>
+
+            <h2>GFS Animations</h2>
+            <div id="gfs"></div>
+
+            <h2>Skew-T Soundings</h2>
+            <div id="skewt"></div>
+
+            <script>
+              async function listImages() {
+                const gfsRes = await fetch('gfs/');
+                const skewtRes = await fetch('skewt/');
+
+                const gfsText = await gfsRes.text();
+                const skewtText = await skewtRes.text();
+
+                const gfsFiles = [...gfsText.matchAll(/href="([^"]+\.gif)"/g)].map(m => m[1]);
+                const skewtFiles = [...skewtText.matchAll(/href="([^"]+\.png)"/g)].map(m => m[1]);
+
+                const gfsDiv = document.getElementById('gfs');
+                const skewtDiv = document.getElementById('skewt');
+
+                gfsFiles.forEach(f => {
+                  const img = document.createElement('img');
+                  img.src = 'gfs/' + f;
+                  const a = document.createElement('a');
+                  a.href = img.src;
+                  a.download = f;
+                  a.textContent = f;
+                  gfsDiv.appendChild(a);
+                  gfsDiv.appendChild(img);
+                  gfsDiv.appendChild(document.createElement('br'));
+                });
+
+                skewtFiles.forEach(f => {
+                  const img = document.createElement('img');
+                  img.src = 'skewt/' + f;
+                  const a = document.createElement('a');
+                  a.href = img.src;
+                  a.download = f;
+                  a.textContent = f;
+                  skewtDiv.appendChild(a);
+                  skewtDiv.appendChild(img);
+                  skewtDiv.appendChild(document.createElement('br'));
+                });
+              }
+
+              listImages();
+            </script>
+          </body>
+          </html>
+          EOF
+
+      # Upload the website directory artifact
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
 
-      # NEW: Deploy files to GitHub Pages
+      # Deploy files to GitHub Pages
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
