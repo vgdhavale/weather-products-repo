@@ -38,6 +38,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt
 
+      # NEW STEP: Wipe out old files and align perfectly with GitHub remote repository state
+      - name: Fetch remote changes and clear local state
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+
       - name: Run weather products script
         run: |
           python weather_products.py
@@ -45,22 +51,21 @@ jobs:
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@://github.com"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      # MODIFIED STEP: Safely overwrite and push without relying on manual conflict resolution
       - name: Commit and push generated products
         run: |
-          git add \
-            imd_gfs_downloads/ \
-            sounding_plots/
+          git add imd_gfs_downloads/ sounding_plots/
+          
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
             git commit -m "Update weather products (3 GFS animations + Skew‑T) [skip ci]"
             
-            # Sync any remote changes that happened while the Python script was processing
-            git pull origin main --rebase
+            # If a new remote commit happened while the script ran, force Git to favor the runner's new binaries
+            git fetch origin main
+            git rebase -X theirs origin/main
             
-            # Push cleanly to the main branch
             git push origin main
           fi
-
