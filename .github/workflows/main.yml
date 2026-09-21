@@ -2,8 +2,8 @@ name: Deploy IMD GFS + Skew-T to GitHub Pages
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '0 6 * * *'  # optional: daily at 06:00 UTC
+  schedule:
+  - cron: '0 4 * * *'  # optional: daily at 06:00 UTC
 
 permissions:
   contents: write
