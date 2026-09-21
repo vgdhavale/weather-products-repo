@@ -1,4 +1,4 @@
-name: Generate weather products (3 GFS + Skew‑T)
+name: Generate weather products (GFS + Skew‑T)
 
 on:
   schedule:
@@ -38,12 +38,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install --no-cache-dir -r requirements.txt
 
-      # NEW STEP: Wipe out old files and align perfectly with GitHub remote repository state
-      - name: Fetch remote changes and clear local state
-        run: |
-          git fetch origin main
-          git reset --hard origin/main
-
       - name: Run weather products script
         run: |
           python weather_products.py
@@ -53,19 +47,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # MODIFIED STEP: Safely overwrite and push without relying on manual conflict resolution
       - name: Commit and push generated products
         run: |
-          git add imd_gfs_downloads/ sounding_plots/
-          
+          git add imd_gfs_850_hPa_forecast.gif imd_gfs_images/ sounding_plots/
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update weather products (3 GFS animations + Skew‑T) [skip ci]"
-            
-            # If a new remote commit happened while the script ran, force Git to favor the runner's new binaries
-            git fetch origin main
-            git rebase -X theirs origin/main
-            
-            git push origin main
+            git commit -m "Update weather products [skip ci]"
+            git push
           fi
