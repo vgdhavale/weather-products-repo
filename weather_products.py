@@ -200,7 +200,8 @@ def download_image_gfs(url: str, output_path: Path) -> Image.Image:
             response = requests.get(
                 url,
                 headers=headers,
-                timeout=REQUEST_TIMEOUT
+                timeout=REQUEST_TIMEFals
+                verify=False
             )
 
             response.raise_for_status()
