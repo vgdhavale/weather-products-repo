@@ -40,7 +40,8 @@ import metpy.calc as mpcalc
 from metpy.plots import SkewT
 from metpy.units import units
 
-
+import urllib3
+urllib3.disable_warnings()
 # ======================================================================
 # CONFIGURATION - GFS ANIMATIONS
 # ======================================================================
