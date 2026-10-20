@@ -200,7 +200,7 @@ def download_image_gfs(url: str, output_path: Path) -> Image.Image:
             response = requests.get(
                 url,
                 headers=headers,
-                timeout=REQUEST_TIMEFals
+                timeout=REQUEST_TIMEOUT,verify=False
             )
 
             response.raise_for_status()
@@ -481,7 +481,7 @@ def try_download_sounding(
     try:
         response = requests.get(
             url,
-            timeout=30
+            timeout=30, verify=False
         )
     except requests.RequestException as error:
         return None, url, f"Request error: {error}"
